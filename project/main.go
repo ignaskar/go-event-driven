@@ -11,7 +11,11 @@ import (
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/spreadsheets"
 	commonHTTP "github.com/ThreeDotsLabs/go-event-driven/common/http"
 	"github.com/ThreeDotsLabs/go-event-driven/common/log"
+	"github.com/ThreeDotsLabs/watermill"
+	"github.com/ThreeDotsLabs/watermill-redisstream/pkg/redisstream"
+	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/labstack/echo/v4"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 )
 
@@ -24,8 +28,78 @@ func main() {
 
 	e := commonHTTP.NewEcho()
 
-	w := NewWorker()
-	go w.Run()
+	clients, err := clients.NewClients(os.Getenv("GATEWAY_ADDR"), nil)
+	if err != nil {
+		panic(err)
+	}
+
+	receiptsClient := NewReceiptsClient(clients)
+	spreadsheetsClient := NewSpreadsheetsClient(clients)
+
+	logger := log.NewWatermill(logrus.NewEntry(logrus.StandardLogger()))
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: os.Getenv("REDIS_ADDR"),
+	})
+
+	publisher, err := redisstream.NewPublisher(redisstream.PublisherConfig{
+		Client: rdb,
+	}, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	receipt_subscriber, err := redisstream.NewSubscriber(redisstream.SubscriberConfig{
+		Client:        rdb,
+		ConsumerGroup: "issue-receipts",
+	}, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	tracker_subscriber, err := redisstream.NewSubscriber(redisstream.SubscriberConfig{
+		Client:        rdb,
+		ConsumerGroup: "append-to-tracker",
+	}, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	go func() {
+		messages, err := receipt_subscriber.Subscribe(context.Background(), "issue-receipt")
+		if err != nil {
+			panic(err)
+		}
+
+		for msg := range messages {
+			err := receiptsClient.IssueReceipt(msg.Context(), string(msg.Payload))
+			if err != nil {
+				logrus.WithError(err).Error("failed to issue receipt")
+				msg.Nack()
+				continue
+			}
+
+			msg.Ack()
+		}
+	}()
+
+	go func() {
+		messages, err := tracker_subscriber.Subscribe(context.Background(), "append-to-tracker")
+		if err != nil {
+			panic(err)
+		}
+
+		for msg := range messages {
+			err := spreadsheetsClient.AppendRow(msg.Context(), "tickets-to-print", []string{string(msg.Payload)})
+			if err != nil {
+				logrus.WithError(err).Error("failed to append to tracker")
+				msg.Nack()
+				continue
+			}
+
+			msg.Ack()
+		}
+	}()
 
 	e.POST("/tickets-confirmation", func(c echo.Context) error {
 		var request TicketsConfirmationRequest
@@ -35,17 +109,17 @@ func main() {
 		}
 
 		for _, ticket := range request.Tickets {
-			receiptMsg := Message{
-				Task:     TaskIssueReceipt,
-				TicketID: ticket,
+			m := message.NewMessage(watermill.NewShortUUID(), []byte(ticket))
+
+			err = publisher.Publish("issue-receipt", m)
+			if err != nil {
+				return err
 			}
 
-			trackerMsg := Message{
-				Task:     TaskAppendToTracker,
-				TicketID: ticket,
+			err = publisher.Publish("append-to-tracker", m)
+			if err != nil {
+				return err
 			}
-
-			w.Send([]Message{receiptMsg, trackerMsg}...)
 		}
 
 		return c.NoContent(http.StatusOK)
@@ -53,66 +127,9 @@ func main() {
 
 	logrus.Info("Server starting...")
 
-	err := e.Start(":8080")
+	err = e.Start(":8080")
 	if err != nil && err != http.ErrServerClosed {
 		panic(err)
-	}
-}
-
-type Task int
-
-const (
-	TaskIssueReceipt Task = iota
-	TaskAppendToTracker
-)
-
-type Message struct {
-	Task     Task
-	TicketID string
-}
-
-type Worker struct {
-	queue chan Message
-}
-
-func NewWorker() *Worker {
-	return &Worker{
-		queue: make(chan Message, 100),
-	}
-}
-
-func (w *Worker) Send(msgs ...Message) {
-	for _, msg := range msgs {
-		w.queue <- msg
-	}
-}
-
-func (w *Worker) Run() {
-	clients, err := clients.NewClients(os.Getenv("GATEWAY_ADDR"), nil)
-	if err != nil {
-		panic(err)
-	}
-
-	receiptsClient := NewReceiptsClient(clients)
-	spreadsheetsClient := NewSpreadsheetsClient(clients)
-
-	ctx := context.Background()
-
-	for msg := range w.queue {
-		switch msg.Task {
-		case TaskIssueReceipt:
-			err = receiptsClient.IssueReceipt(ctx, msg.TicketID)
-			if err != nil {
-				logrus.WithError(err).Errorf("failed to issue the receipt")
-				w.Send(msg)
-			}
-		case TaskAppendToTracker:
-			err = spreadsheetsClient.AppendRow(ctx, "tickets-to-print", []string{msg.TicketID})
-			if err != nil {
-				logrus.WithError(err).Errorf("failed to append to tracker")
-				w.Send(msg)
-			}
-		}
 	}
 }
 
