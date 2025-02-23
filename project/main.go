@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients"
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/receipts"
@@ -17,6 +18,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 )
 
 type TicketsConfirmationRequest struct {
@@ -42,6 +44,11 @@ func main() {
 		Addr: os.Getenv("REDIS_ADDR"),
 	})
 
+	router, err := message.NewRouter(message.RouterConfig{}, logger)
+	if err != nil {
+		panic(err)
+	}
+
 	publisher, err := redisstream.NewPublisher(redisstream.PublisherConfig{
 		Client: rdb,
 	}, logger)
@@ -65,41 +72,45 @@ func main() {
 		panic(err)
 	}
 
-	go func() {
-		messages, err := receipt_subscriber.Subscribe(context.Background(), "issue-receipt")
-		if err != nil {
-			panic(err)
-		}
-
-		for msg := range messages {
+	router.AddNoPublisherHandler(
+		"issue-receipt-handler",
+		"issue-receipt",
+		receipt_subscriber,
+		func(msg *message.Message) error {
 			err := receiptsClient.IssueReceipt(msg.Context(), string(msg.Payload))
 			if err != nil {
 				logrus.WithError(err).Error("failed to issue receipt")
-				msg.Nack()
-				continue
+				return err
 			}
 
-			msg.Ack()
-		}
-	}()
+			return nil
+		},
+	)
 
-	go func() {
-		messages, err := tracker_subscriber.Subscribe(context.Background(), "append-to-tracker")
-		if err != nil {
-			panic(err)
-		}
-
-		for msg := range messages {
+	router.AddNoPublisherHandler(
+		"append-to-tracker-handler",
+		"append-to-tracker",
+		tracker_subscriber,
+		func(msg *message.Message) error {
 			err := spreadsheetsClient.AppendRow(msg.Context(), "tickets-to-print", []string{string(msg.Payload)})
 			if err != nil {
 				logrus.WithError(err).Error("failed to append to tracker")
-				msg.Nack()
-				continue
+				return err
 			}
 
-			msg.Ack()
-		}
-	}()
+			return nil
+		},
+	)
+
+	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
+
+	g, ctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		return router.Run(ctx)
+	})
 
 	e.POST("/tickets-confirmation", func(c echo.Context) error {
 		var request TicketsConfirmationRequest
@@ -125,10 +136,30 @@ func main() {
 		return c.NoContent(http.StatusOK)
 	})
 
-	logrus.Info("Server starting...")
+	e.GET("/health", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
 
-	err = e.Start(":8080")
-	if err != nil && err != http.ErrServerClosed {
+	logrus.Info("Server starting...")
+	g.Go(func() error {
+		// we do not want to start HTTP server before router
+		<-router.Running()
+
+		err = e.Start(":8080")
+		if err != nil && err != http.ErrServerClosed {
+			return err
+		}
+
+		return nil
+	})
+
+	g.Go(func() error {
+		<-ctx.Done()
+		return e.Shutdown(ctx)
+	})
+
+	err = g.Wait()
+	if err != nil {
 		panic(err)
 	}
 }
