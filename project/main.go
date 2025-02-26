@@ -19,6 +19,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/lithammer/shortuuid/v3"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
@@ -76,7 +77,13 @@ func main() {
 
 	e := commonHTTP.NewEcho()
 
-	clients, err := clients.NewClients(os.Getenv("GATEWAY_ADDR"), nil)
+	clients, err := clients.NewClients(
+		os.Getenv("GATEWAY_ADDR"),
+		func(ctx context.Context, req *http.Request) error {
+			req.Header.Set("Correlation-ID", log.CorrelationIDFromContext(ctx))
+			return nil
+		},
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -125,6 +132,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	router.AddMiddleware(CorrelationIDMiddleware)
+	router.AddMiddleware(LoggingMiddleware)
 
 	router.AddNoPublisherHandler(
 		"issue-receipt-handler",
@@ -210,6 +220,8 @@ func main() {
 			return err
 		}
 
+		correlation_id := c.Request().Header.Get("Correlation-ID")
+
 		for _, ticket := range request.Tickets {
 			if ticket.Status == "confirmed" {
 				p := TicketBookingConfirmed{
@@ -228,6 +240,7 @@ func main() {
 				}
 
 				m := message.NewMessage(watermill.NewShortUUID(), evt)
+				m.Metadata.Set("correlation_id", correlation_id)
 				err = publisher.Publish("TicketBookingConfirmed", m)
 				if err != nil {
 					return err
@@ -250,6 +263,7 @@ func main() {
 				}
 
 				m := message.NewMessage(watermill.NewShortUUID(), evt)
+				m.Metadata.Set("correlation_id", correlation_id)
 				err = publisher.Publish("TicketBookingCanceled", m)
 				if err != nil {
 					return err
@@ -344,4 +358,30 @@ func (c SpreadsheetsClient) AppendRow(ctx context.Context, spreadsheetName strin
 	}
 
 	return nil
+}
+
+func LoggingMiddleware(next message.HandlerFunc) message.HandlerFunc {
+	return func(msg *message.Message) ([]*message.Message, error) {
+		uuid := msg.UUID
+		logger := log.FromContext(msg.Context())
+		logger.WithField("message_uuid", uuid).Info("Handling a message")
+		return next(msg)
+	}
+}
+
+func CorrelationIDMiddleware(next message.HandlerFunc) message.HandlerFunc {
+	return func(msg *message.Message) ([]*message.Message, error) {
+
+		correlationId := msg.Metadata.Get("correlation_id")
+
+		if correlationId == "" {
+			correlationId = fmt.Sprintf("gen_%s", shortuuid.New())
+		}
+
+		ctx := log.ToContext(msg.Context(), logrus.WithField("correlation_id", correlationId))
+		ctx = log.ContextWithCorrelationID(ctx, correlationId)
+
+		msg.SetContext(ctx)
+		return next(msg)
+	}
 }
