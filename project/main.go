@@ -17,6 +17,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill-redisstream/pkg/redisstream"
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/ThreeDotsLabs/watermill/message/router/middleware"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/lithammer/shortuuid/v3"
@@ -24,6 +25,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
+
+const brokenMessageID = "2beaf5bc-d5e4-4653-b075-2b36bbf28949"
 
 type EventHeader struct {
 	ID          string `json:"id"`
@@ -135,16 +138,35 @@ func main() {
 
 	router.AddMiddleware(CorrelationIDMiddleware)
 	router.AddMiddleware(LoggingMiddleware)
+	router.AddMiddleware(middleware.Retry{
+		MaxRetries:      10,
+		InitialInterval: time.Millisecond * 100,
+		MaxInterval:     time.Second,
+		Multiplier:      2,
+		Logger:          logger,
+	}.Middleware)
 
 	router.AddNoPublisherHandler(
 		"issue-receipt-handler",
 		"TicketBookingConfirmed",
 		receipt_subscriber,
 		func(msg *message.Message) error {
+			if msg.UUID == brokenMessageID {
+				return nil
+			}
+
+			if msg.Metadata.Get("type") != "TicketBookingConfirmed" {
+				return nil
+			}
+
 			var p TicketBookingConfirmed
 			err := json.Unmarshal(msg.Payload, &p)
 			if err != nil {
 				return err
+			}
+
+			if p.Price.Currency == "" {
+				p.Price.Currency = "USD"
 			}
 
 			r := IssueReceiptRequest{
@@ -168,10 +190,22 @@ func main() {
 		"TicketBookingConfirmed",
 		tracker_subscriber,
 		func(msg *message.Message) error {
+			if msg.UUID == brokenMessageID {
+				return nil
+			}
+
+			if msg.Metadata.Get("type") != "TicketBookingConfirmed" {
+				return nil
+			}
+
 			var p TicketBookingConfirmed
 			err := json.Unmarshal(msg.Payload, &p)
 			if err != nil {
 				return err
+			}
+
+			if p.Price.Currency == "" {
+				p.Price.Currency = "USD"
 			}
 
 			err = spreadsheetsClient.AppendRow(msg.Context(), "tickets-to-print", []string{p.TicketID, p.CustomerEmail, p.Price.Amount, p.Price.Currency})
@@ -188,10 +222,18 @@ func main() {
 		"TicketBookingCanceled",
 		refund_subscriber,
 		func(msg *message.Message) error {
+			if msg.Metadata.Get("type") != "TicketBookingCanceled" {
+				return nil
+			}
+
 			var p TicketBookingCanceled
 			err := json.Unmarshal(msg.Payload, &p)
 			if err != nil {
 				return err
+			}
+
+			if p.Price.Currency == "" {
+				p.Price.Currency = "USD"
 			}
 
 			err = spreadsheetsClient.AppendRow(msg.Context(), "tickets-to-refund", []string{p.TicketID, p.CustomerEmail, p.Price.Amount, p.Price.Currency})
@@ -240,7 +282,10 @@ func main() {
 				}
 
 				m := message.NewMessage(watermill.NewShortUUID(), evt)
+
 				m.Metadata.Set("correlation_id", correlation_id)
+				m.Metadata.Set("type", "TicketBookingConfirmed")
+
 				err = publisher.Publish("TicketBookingConfirmed", m)
 				if err != nil {
 					return err
@@ -263,7 +308,10 @@ func main() {
 				}
 
 				m := message.NewMessage(watermill.NewShortUUID(), evt)
+
 				m.Metadata.Set("correlation_id", correlation_id)
+				m.Metadata.Set("type", "TicketBookingCanceled")
+
 				err = publisher.Publish("TicketBookingCanceled", m)
 				if err != nil {
 					return err
@@ -365,7 +413,18 @@ func LoggingMiddleware(next message.HandlerFunc) message.HandlerFunc {
 		uuid := msg.UUID
 		logger := log.FromContext(msg.Context())
 		logger.WithField("message_uuid", uuid).Info("Handling a message")
-		return next(msg)
+
+		msgs, err := next(msg)
+		if err != nil {
+			logger.WithFields(logrus.Fields{
+				"error":        err,
+				"message_uuid": uuid,
+			}).Error("Message handling error")
+
+			return nil, err
+		}
+
+		return msgs, nil
 	}
 }
 
