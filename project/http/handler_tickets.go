@@ -11,19 +11,8 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-type ticketStatusRequest struct {
-	TicketID      string         `json:"ticket_id"`
-	Status        string         `json:"status"`
-	CustomerEmail string         `json:"customer_email"`
-	Price         entities.Money `json:"price"`
-}
-
-type ticketsStatusRequest struct {
-	Tickets []ticketStatusRequest `json:"tickets"`
-}
-
 func (h Handler) PostTicketsStatus(c echo.Context) error {
-	var request ticketsStatusRequest
+	var request entities.TicketsStatusRequest
 	err := c.Bind(&request)
 	if err != nil {
 		return err

@@ -3,10 +3,9 @@ package api
 import (
 	"context"
 	"fmt"
-	"net/http"
-
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients"
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/spreadsheets"
+	"net/http"
 )
 
 type SpreadsheetsServiceClient struct {

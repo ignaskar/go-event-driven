@@ -16,7 +16,7 @@ func (h Handler) IssueReceipt(ctx context.Context, event entities.TicketBookingC
 		Price:    event.Price,
 	}
 
-	err := h.receiptsService.IssueReceipt(ctx, request)
+	_, err := h.receiptsService.IssueReceipt(ctx, request)
 	if err != nil {
 		return fmt.Errorf("failed to issue receipt: %w", err)
 	}

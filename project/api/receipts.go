@@ -3,11 +3,10 @@ package api
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"tickets/entities"
-
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients"
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/receipts"
+	"net/http"
+	"tickets/entities"
 )
 
 type ReceiptsServiceClient struct {
@@ -22,7 +21,7 @@ func NewReceiptsServiceClient(clients *clients.Clients) *ReceiptsServiceClient {
 	return &ReceiptsServiceClient{clients: clients}
 }
 
-func (c ReceiptsServiceClient) IssueReceipt(ctx context.Context, request entities.IssueReceiptRequest) error {
+func (c ReceiptsServiceClient) IssueReceipt(ctx context.Context, request entities.IssueReceiptRequest) (entities.IssueReceiptResponse, error) {
 	body := receipts.PutReceiptsJSONRequestBody{
 		TicketId: request.TicketID,
 		Price: receipts.Money{
@@ -31,13 +30,23 @@ func (c ReceiptsServiceClient) IssueReceipt(ctx context.Context, request entitie
 		},
 	}
 
-	receiptsResp, err := c.clients.Receipts.PutReceiptsWithResponse(ctx, body)
+	resp, err := c.clients.Receipts.PutReceiptsWithResponse(ctx, body)
 	if err != nil {
-		return err
-	}
-	if receiptsResp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %v", receiptsResp.StatusCode())
+		return entities.IssueReceiptResponse{}, fmt.Errorf("failed to post receipt: %w", err)
 	}
 
-	return nil
+	switch resp.StatusCode() {
+	case http.StatusOK:
+		return entities.IssueReceiptResponse{
+			ReceiptNumber: resp.JSON200.Number,
+			IssuedAt:      resp.JSON200.IssuedAt,
+		}, nil
+	case http.StatusCreated:
+		return entities.IssueReceiptResponse{
+			ReceiptNumber: resp.JSON201.Number,
+			IssuedAt:      resp.JSON201.IssuedAt,
+		}, nil
+	default:
+		return entities.IssueReceiptResponse{}, fmt.Errorf("unexpected status code for POST receipts-api/receipts: %d", resp.StatusCode())
+	}
 }
