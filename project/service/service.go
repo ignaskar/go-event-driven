@@ -35,16 +35,19 @@ func New(
 	redisPublisher = message.NewRedisPublisher(redisClient, watermillLogger)
 	redisPublisher = log.CorrelationPublisherDecorator{Publisher: redisPublisher}
 
+	eventBus := event.NewEventBus(redisPublisher)
+
+	eventsHandler := event.NewHandler(spreadsheetsService, receiptsService)
+
+	eventProcessorConfig := event.NewProcessorConfig(redisClient, watermillLogger)
+
 	watermillRouter := message.NewWatermillRouter(
-		receiptsService,
-		spreadsheetsService,
-		redisClient,
+		eventsHandler,
+		eventProcessorConfig,
 		watermillLogger,
 	)
 
-	echoRouter := ticketsHttp.NewHttpRouter(
-		redisPublisher,
-	)
+	echoRouter := ticketsHttp.NewHttpRouter(eventBus)
 
 	return Service{
 		watermillRouter,

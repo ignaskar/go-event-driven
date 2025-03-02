@@ -10,6 +10,8 @@ func NewEventBus(pub message.Publisher) (*cqrs.EventBus, error) {
 		GeneratePublishTopic: func(params cqrs.GenerateEventPublishTopicParams) (string, error) {
 			return params.EventName, nil
 		},
-		Marshaler: cqrs.JSONMarshaler{},
+		Marshaler: cqrs.JSONMarshaler{
+			GenerateName: cqrs.StructName,
+		},
 	})
 }

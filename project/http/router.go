@@ -1,14 +1,14 @@
 package http
 
 import (
+	"github.com/ThreeDotsLabs/watermill/components/cqrs"
 	"net/http"
 
 	commonHTTP "github.com/ThreeDotsLabs/go-event-driven/common/http"
-	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/labstack/echo/v4"
 )
 
-func NewHttpRouter(publisher message.Publisher) *echo.Echo {
+func NewHttpRouter(eventBus *cqrs.EventBus) *echo.Echo {
 	e := commonHTTP.NewEcho()
 
 	e.GET("/health", func(c echo.Context) error {
@@ -16,7 +16,7 @@ func NewHttpRouter(publisher message.Publisher) *echo.Echo {
 	})
 
 	handler := Handler{
-		publisher: publisher,
+		eventBus: eventBus,
 	}
 
 	e.POST("/tickets-status", handler.PostTicketsStatus)
